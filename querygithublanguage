@@ -1,0 +1,38 @@
+I used the already existing [bigquery-public-data:github_repos.sample_files] table, that lists the files of the top 400,000 repositories. From there I extracted all the contents for the files with the top languages extensions:
+SELECT a.id id, size, content, binary, copies, sample_repo_name , sample_path
+FROM (
+  SELECT id, FIRST(path) sample_path, FIRST(repo_name) sample_repo_name 
+  FROM [bigquery-public-data:github_repos.sample_files] 
+  WHERE REGEXP_EXTRACT(path, r'\.([^\.]*)$') IN ('java','h','js','c','php','html','cs','json','py','cpp','xml','rb','cc','go')
+  GROUP BY id
+) a
+JOIN [bigquery-public-data:github_repos.contents] b
+ON a.id=b.id
+864.6s elapsed, 1.60 TB processed
+
+That query took a relative long time since it involved joining a 190 million rows table with a 70 million rows one, and over 1.6 terabytes of contents. But don’t worry about having to run it, since I left the result publicly available at [fh-bigquery:github_extracts.contents_top_repos_top_langs].
+In the [contents] table we have each unique file represented only once. To see the total number of files and size represented:
+SELECT SUM(copies) total_files, SUM(copies*size) total_size
+FROM [fh-bigquery:github_extracts.contents_top_repos_top_langs]
+
+Then it was time to run the ranking according to the previously established rules:
+SELECT ext, tabs, spaces, countext, LOG((spaces+1)/(tabs+1)) lratio
+FROM (
+  SELECT REGEXP_EXTRACT(sample_path, r'\.([^\.]*)$') ext, 
+         SUM(best='tab') tabs, SUM(best='space') spaces, 
+         COUNT(*) countext
+  FROM (
+    SELECT sample_path, sample_repo_name, IF(SUM(line=' ')>SUM(line='\t'), 'space', 'tab') WITHIN RECORD best,
+           COUNT(line) WITHIN RECORD c
+    FROM (
+      SELECT LEFT(SPLIT(content, '\n'), 1) line, sample_path, sample_repo_name 
+      FROM [fh-bigquery:github_extracts.contents_top_repos_top_langs]
+      HAVING REGEXP_MATCH(line, r'[ \t]')
+    )
+    HAVING c>10 # at least 10 lines that start with space or tab
+  )
+  GROUP BY ext
+)
+ORDER BY countext DESC
+LIMIT 100
+16.0s elapsed, 133 GB processed
